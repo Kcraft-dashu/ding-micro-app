@@ -1,0 +1,143 @@
+import * as dingtalk from 'dingtalk-jsapi';
+import router from './index';
+import { useUserStore } from '@/stores/user'
+import { jsSdkAuthorized } from '@/api/index';
+import { showLoadingToast, closeToast } from 'vant';
+import { getToken } from '@/utils/auth';
+let whiteList = ["/warning", "/404", "/405"]
+
+//事件监听函数
+const initEventListener = () => {
+    // 退到后台的事件监听(webview)
+    document.addEventListener('pause', function (e) {
+        e.preventDefault();
+        console.log('事件：pause')
+    }, false);
+
+    // 页面被唤醒的事件监听(webview)
+    document.addEventListener('resume', function (e) {
+        e.preventDefault();
+        console.log('事件：resume')
+    }, false);
+
+
+    //返回按钮点击的事件监听(android)
+    document.addEventListener('backbutton', function (e) {
+        e.preventDefault();
+        dingtalk.device.notification.alert({
+            message: '哎呀，你不小心点到返回键啦!',
+            title: '...警告...'
+        });
+    }, false);
+
+    //双击标题的事件监听
+    document.addEventListener('navTitle', function (e) {
+        e.preventDefault();
+        alert('事件：navTitle')
+    }, false);
+
+    // 网络连接成功的事件监听
+    document.addEventListener('online', function (e) {
+        e.preventDefault();
+        alert('事件：online')
+    }, false);
+
+    // 网络连接断开的事件监听
+    document.addEventListener('offline', function (e) {
+        e.preventDefault();
+        alert('事件：offline')
+    }, false);
+}
+
+router.beforeEach(async (to, from) => {
+    const userStore = useUserStore();
+    showLoadingToast({
+        message: '加载中...',
+        duration: 0, //设置duration为0以保持显示，直到手动关闭
+        forbidClick: true //禁止点击
+    });
+    // 路由发生变化修改页面
+    document.title = to.meta.title || import.meta.VITE_APP_TITLE;
+    closeToast(); //确保在这里关闭loading
+    if (whiteList.includes(to.path)) {
+        closeToast()
+        return;
+    }
+    //平台检测
+    if (dingtalk.env.platform == "notInDingTalk") {
+        //不是钉钉平台 则直接跳转到警告页面
+        closeToast()
+        return { name: "warning" }
+    } else {
+        let res = await jsSdkAuthorized(location.href.split('#')[0]);
+        if (res.code == 200) {
+            //从后端获取的结果并解析
+            let { agentId, corpId, timeStamp, nonceStr, signature } = res.signatureObj;
+            dingtalk.config({
+                agentId, // 必填，微应用ID
+                corpId, //必填，企业ID
+                timeStamp, // 必填，生成签名的时间戳
+                nonceStr, // 必填，自定义固定字符串。
+                signature, // 必填，签名
+                type: 0, //选填。0表示微应用的jsapi,1表示服务窗的jsapi；不填默认为0。该参数从dingtalk.js的0.8.3版本开始支持
+                jsApiList: ['chooseChat', 'biz.chat.chooseConversationByCorpId', 'share', 'chooseChat', 'chooseImage', 'biz.util.chooseImage', 'share'] // 必填，需要使用的jsapi列表，注意：不要带dd。
+            });
+
+            dingtalk.error(async (err) => {
+                console.log(err, 'err')
+                closeToast()
+                await showDialog({
+                    title: '标题',
+                    message: 'dd error: ' + JSON.stringify(err),
+                    zIndex: 2000,
+                });
+            }); //该方法必须带上，用来捕获鉴权出现的异常信息，否则不方便排查出现的问题
+
+            //钉钉配置加载完成后触发ready方法
+            //进行免登录
+            dingtalk.ready(async () => {
+                initEventListener()
+                //一旦进入ready 表示jssdk授权成功，我们就可以调用钉钉提供内置方法
+                console.log("表示jssdk授权成功，可以开始调用钉钉提供的内置方法了！")
+                try {
+                    //获取token
+                    if (getToken()) {//这里的token可能是过期的,如果没有过期，表示登录过，有用户信息
+                        console.log(userStore.getDingUserInfo().result.name)
+                    } else {
+                        console.log("no token")
+                        let res = await dingtalk.runtime.permission.requestAuthCode({
+                            corpId: import.meta.env.VITE_APP_CORPID
+                        })
+                        let code = res.code;
+                        await userStore.initDingUserinfo(code)
+                        //获取个人信息成功后，即可跳转到指定页面
+                        router.push({
+                            path: to.path,
+                            query: { ...to.query, _t: Date.now() }, // 通过添加时间戳参数避免路由相同
+                            replace: true,
+                        });
+                    }
+                } catch (error) {
+                    // console.log(error, 'error')
+                    let message = error.message ? error.message : error.errorMessage
+                    closeToast()
+                    await showDialog({
+                        title: '标题',
+                        message: message,
+                        zIndex: 2000,
+                    });
+                    return router.push({ name: '404' })
+                } finally {
+                    closeToast()
+                }
+
+            },
+        )
+        }
+    }
+})
+
+router.afterEach(() => {
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+})
